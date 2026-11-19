@@ -720,6 +720,9 @@ class HomeGuardService : AccessibilityService() {
     /** The Home press this chooser Back was already sent for, so that it is sent once per press. */
     private var chooserBackFor = Long.MIN_VALUE
 
+    /** When the chooser was last closed without a press behind it; see onAccessibilityEvent. */
+    private var chooserClosedAt = Long.MIN_VALUE / 2
+
     /**
      * The chooser half of [frontAfterHome] alone, for the Back that closes it right after Home: if that
      * Back did not close it, this still brings Aerial back at the same deadline, and if it did, the
@@ -1994,6 +1997,36 @@ class HomeGuardService : AccessibilityService() {
                 chooserThenHome()
                 return
             }
+            // The firmware may send a Home of its own seconds after the viewer's, and with the records
+            // not naming Aerial that one arrives at this same chooser. XGIMI H3S (pig_chivalrous,
+            // Android 9): the viewer's Home at 16:18:01 was answered by Aerial, the chooser came to
+            // the front at 16:18:09, Aerial behind it was paused, and no window had the focus: the
+            // remote did nothing for six minutes (2026-11-19, Aerial 2.11). Its own push came 2.6 to
+            // 7.5 s after the press; on wake the chooser reports itself as the window it came from and
+            // Aerial had been paused 11.2 s. A chooser that took the front from Aerial, right after a
+            // Home of the viewer's or right after Aerial had been in front, is closed for that reason
+            // alone: Back resumes whatever ran before it, and here that is Aerial.
+            // Narrower than that on purpose: this chooser is also apps' "open with" (see the block
+            // above), so it is left alone whenever Aerial itself is the one in front (that is where
+            // "open with" opens from), and when Aerial was last in front too long ago for the
+            // chooser to be its own push.
+            val now = SystemClock.uptimeMillis()
+            val afterHome = before == packageName && now - homePressedAt <= CHOOSER_FROM_HOME_MS
+            val afterAerial = before == pkg && !aerialResumed && now - aerialPausedAt <= CHOOSER_FROM_AERIAL_MS
+            if ((afterHome || afterAerial) &&
+                // Once per appearance: the Back this branch sends must not be sent again for the same
+                // one, which is all that has to be kept out of the way here.
+                now - chooserClosedAt > CHOOSER_BACK_MS
+            ) {
+                chooserClosedAt = now
+                handler.removeCallbacks(frontAfterHome)
+                handler.removeCallbacks(frontAfterHomeAgain)
+                handler.removeCallbacks(chooserAfterBack)
+                Log.i(TAG, "Home chooser took the front from Aerial with no press; closing it")
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                handler.postDelayed(chooserAfterBack, FRONT_AFTER_HOME_MS)
+                return
+            }
         }
         // Kids and Elders mode: an app not chosen for it (or any, once locked) goes straight back
         // to Home. The stock launcher's home activity and input switches are left to the rest below.
@@ -2456,6 +2489,20 @@ class HomeGuardService : AccessibilityService() {
         private const val UNSEEN_APP_WATCH_MS = 2 * 60_000L
         /** How long a stock launcher's window change may take to arrive after Home (see frontAfterHome). */
         private const val FRONT_AFTER_HOME_MS = 1_500L
+        /**
+         * How long after a Home press the firmware's own chooser may still come up and be closed; see
+         * the third branch in onAccessibilityEvent. XGIMI H3S pushed it 2.6 to 7.5 s after the press,
+         * and 20 s leaves room for a slow one.
+         */
+        private const val CHOOSER_FROM_HOME_MS = 20_000L
+        /**
+         * How recently Aerial must have been in front, when the chooser reports itself as the window it
+         * came from, for it to be closed without a press of its own. On wake the H3S chooser does that
+         * with Aerial paused 11.2 s; 30 s leaves room for a slower wake.
+         */
+        private const val CHOOSER_FROM_AERIAL_MS = 30_000L
+        /** How long after closing such a chooser the same one is left alone: once per appearance. */
+        private const val CHOOSER_BACK_MS = 3_000L
         /** How often usage stats are read after Home once the guard has been found deaf. */
         private const val DEAF_LOOK_MS = 150L
         /** How recently PatchWall must have come to the front, and how often and how long to look; see uiBoostChanged. */
